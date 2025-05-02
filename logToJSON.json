@@ -1,0 +1,126 @@
+import boto3
+import json
+import re
+from datetime import datetime, timedelta
+
+logs_client = boto3.client('logs')
+s3_client = boto3.client('s3')
+
+def get_one_hour_ago_timestamp():
+    return int((datetime.utcnow() - timedelta(hours=1)).timestamp() * 1000)
+
+def extract_logs_from_lambda(log_group, log_stream, context):
+    start_time = get_one_hour_ago_timestamp()
+
+    response = logs_client.get_log_events(
+        logGroupName=log_group,
+        logStreamName=log_stream,
+        startTime=start_time,
+        startFromHead=True
+    )
+
+    pattern = r"\[(\w+)\]\s+([\d\-T:\.Z]+)\s+([\w\-]+)\s+(.*)"
+    extracted_logs = []
+
+    for log_event in response['events']:
+        message = log_event['message'].strip()
+        match = re.match(pattern, message)
+        if match:
+            level = match.group(1)
+            timestamp = match.group(2)
+            request_id = match.group(3)
+            msg = match.group(4)
+
+            log_json = {
+                "source": "lambda",
+                "timestamp": timestamp,
+                "level": level,
+                "message": msg,
+                "logger": "root",
+                "loggroupname": log_group,
+                "requestID": request_id
+            }
+
+            extracted_logs.append(log_json)
+
+    return extracted_logs
+
+def extract_logs_from_crawler(log_group, crawler_name):
+    start_time = get_one_hour_ago_timestamp()
+
+    # Get log streams for crawler in last 1 hour
+    streams_response = logs_client.describe_log_streams(
+        logGroupName=log_group,
+        orderBy='LastEventTime',
+        descending=True
+    )
+
+    extracted_logs = []
+    pattern = r"\[([^\]]+)\]\s+(\w+)\s*:\s*(.*)"
+
+    for stream in streams_response.get("logStreams", []):
+        stream_name = stream['logStreamName']
+        if crawler_name not in stream_name:
+            continue
+
+        response = logs_client.get_log_events(
+            logGroupName=log_group,
+            logStreamName=stream_name,
+            startTime=start_time,
+            startFromHead=True
+        )
+
+        for log_event in response['events']:
+            message = log_event['message'].strip()
+            match = re.match(pattern, message)
+
+            if match:
+                request_id = match.group(1)
+                level = match.group(2)
+                msg = match.group(3)
+
+                log_json = {
+                    "source": "crawler",
+                    "timestamp": log_event['timestamp'],
+                    "level": level,
+                    "message": msg,
+                    "logger": "root",
+                    "loggroupname": log_group,
+                    "requestID": request_id
+                }
+
+                extracted_logs.append(log_json)
+
+    return extracted_logs
+
+def lambda_handler(event, context):
+    s3_bucket = 'mybucket46335128'
+    s3_key_prefix = 'cloudwatch-logs/'
+    now = datetime.utcnow().strftime('%Y-%m-%dT%H-%M-%SZ')
+    s3_key = f"{s3_key_prefix}combined_logs_{now}.json"
+
+    # Lambda log extraction
+    lambda_log_group = '/aws/lambda/jsonToCSV'
+    lambda_log_stream = '2025/05/02/[$LATEST]032cc5dcdb804ff9b51d7482e4836f47'
+    lambda_logs = extract_logs_from_lambda(lambda_log_group, lambda_log_stream, context)
+
+    # Crawler log extraction
+    crawler_log_group = '/aws-glue/crawlers'
+    crawler_name = 'myCrawler'
+    crawler_logs = extract_logs_from_crawler(crawler_log_group, crawler_name)
+
+    # Combine logs
+    combined_logs = lambda_logs + crawler_logs
+
+    # Save to S3
+    s3_client.put_object(
+        Bucket=s3_bucket,
+        Key=s3_key,
+        Body=json.dumps(combined_logs, indent=2),
+        ContentType='application/json'
+    )
+
+    return {
+        'statusCode': 200,
+        'body': f'Combined logs saved to s3://{s3_bucket}/{s3_key}'
+    }
