@@ -1,0 +1,61 @@
+import json
+import boto3
+
+s3 = boto3.client('s3')
+sns = boto3.client('sns')
+
+def lambda_handler(event, context):
+    bucket = 'mybucket46335128'
+    key = '2025-05-02T09-48-30Z .json'
+    topic_arn = 'arn:aws:sns:us-east-1:211125422271:MyTopic'
+
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        content = response['Body'].read().decode('utf-8')
+        log_events = json.loads(content)  # It's a list, not a dict
+    except Exception as e:
+        return {
+            'statusCode': 400,
+            'body': f"Failed to read or parse S3 object: {str(e)}"
+        }
+
+    error_logs = []
+
+    for event in log_events:
+        if event.get("level") == "ERROR":
+            error_dict = {
+                "level": event.get("level"),
+                "timestamp": event.get("timestamp"),
+                "message": event.get("message"),
+                "logGroupName": event.get("loggroupname")  # Assuming this is the correct field name
+            }
+            error_logs.append(error_dict)
+
+    if error_logs:
+        try:
+            sns.publish(
+                TopicArn=topic_arn,
+                Message=json.dumps(error_logs),
+                Subject='Error Logs Detected',
+                MessageAttributes={
+                    'LogType': {
+                        'DataType': 'String',
+                        'StringValue': 'ERROR'
+                    }
+                }
+            )
+            return {
+                'statusCode': 200,
+                'body': f"{len(error_logs)} error logs sent to SNS."
+            }
+        except Exception as e:
+            return {
+                'statusCode': 500,
+                'body': f"Failed to send SNS message: {str(e)}"
+            }
+
+    else:
+        return {
+            'statusCode': 200,
+            'body': "No error messages found in the log file."
+        }
