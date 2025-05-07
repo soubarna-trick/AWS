@@ -1,0 +1,422 @@
+import json
+
+
+
+import boto3
+
+
+
+import requests
+
+
+
+import csv
+
+from datetime import datetime
+
+import io
+
+import logging
+
+logger = logging.getLogger()
+
+logger.setLevel(logging.INFO)
+
+
+
+
+
+bucket_name = 'mybucket46335128'
+
+
+
+api_json_key = 'api.json'
+
+
+
+csv_data_prefix = 'processed_csv_data/'
+
+
+
+
+
+
+
+s3 = boto3.client('s3')
+
+
+
+
+
+
+
+def flatten(d, parent_key='', sep='_'):
+
+
+
+    items = {}
+
+
+
+    for k, v in d.items():
+
+
+
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+
+
+
+        if isinstance(v, dict):
+
+
+
+            items.update(flatten(v, new_key, sep=sep))
+
+
+
+        else:
+
+
+
+            items[new_key] = v
+
+
+
+    return items
+
+
+
+
+
+
+
+def process_json_data(json_data, csv_buffer):
+
+
+
+    if not json_data:
+
+
+
+        return None, "No data received."
+
+
+
+   
+
+
+
+    flat_data = [flatten(item) for item in json_data]
+
+
+
+    if not flat_data:
+
+
+
+        return None, "No processable data."
+
+
+
+
+
+
+
+    keys = set()
+
+
+
+    for item in flat_data:
+
+
+
+        keys.update(item.keys())
+
+
+
+   
+
+
+
+    # Remove 'images' and 'image' columns if present
+
+
+
+    keys.discard('images')
+
+
+
+    keys.discard('image')
+
+
+
+    keys.discard('category_image')
+
+
+
+   
+
+
+
+    keys = sorted(keys)
+
+
+
+   
+
+
+
+    # Create CSV buffer
+
+
+
+    writer = csv.DictWriter(csv_buffer, fieldnames=keys)
+
+
+
+    writer.writeheader()
+
+
+
+   
+
+
+
+    for item in flat_data:
+
+
+
+        for key in ['images', 'image','category_image']:
+
+
+
+            if key in item:
+
+
+
+                del item[key]
+
+
+
+        writer.writerow(item)
+
+
+
+   
+
+
+
+    return csv_buffer.getvalue(), None
+
+
+
+
+
+
+
+def lambda_handler(event, context):
+
+
+
+    try:
+
+
+
+        logging.info(f"Starting Lambda execution at: {datetime.now()} (Mumbai Time)")
+
+
+
+        response = s3.get_object(Bucket=bucket_name, Key=api_json_key)
+
+
+
+        api_data = json.loads(response['Body'].read().decode('utf-8'))
+
+
+
+        api_urls = api_data.get('api_urls', [])
+
+
+
+        logging.info(f"API URLs found: {api_urls}")
+
+
+
+
+
+        for url in api_urls:
+
+
+
+            try:
+
+
+
+                logging.info(f"Fetching data from: {url}")
+
+
+
+                api_response = requests.get(url)
+
+
+
+                api_response.raise_for_status()
+
+
+
+                json_data = api_response.json()
+
+
+
+                logging.info(f"Successfully fetched data from {url}. Type of data: {type(json_data)}")
+
+
+
+
+
+
+
+                api_name = url.split('/')[-1]
+
+
+
+                s3_prefix = f"{csv_data_prefix}{api_name}/"
+
+
+
+                csv_key = f"{s3_prefix}data_{api_name}.csv"
+
+
+
+                csv_buffer = io.StringIO()  # Use io.StringIO as a file-like object
+
+
+
+
+
+
+
+                csv_string, error_message = process_json_data(json_data, csv_buffer)
+
+
+
+                if error_message:
+
+
+
+                    logging.error(f"{error_message} Skipping CSV creation.")
+
+
+
+                    continue
+
+
+
+
+
+
+
+                logging.info(f"Generated CSV string (first 100 chars): {csv_string[:100]}...")
+
+
+
+                logging.info(f"Attempting to upload to s3://{bucket_name}/{csv_key}")
+
+
+
+                s3.put_object(Bucket=bucket_name, Key=csv_key, Body=csv_string)
+
+
+
+                logging.info(f"Processed CSV data from {url} uploaded to s3://{bucket_name}/{csv_key}")
+
+
+
+
+
+
+
+            except requests.exceptions.RequestException as e:
+
+
+
+                logging.error(f"Error fetching data from {url}: {e}")
+
+
+
+            except json.JSONDecodeError as e:
+
+
+
+                logging.error(f"Error decoding JSON from {url}: {e}")
+
+
+
+            except Exception as e:
+
+
+
+                logging.error(f"An unexpected error occurred while processing {url}: {e}")
+
+
+
+        logging.info(f"Lambda execution finished at: {datetime.now()} (Mumbai Time)")
+
+
+
+        # Run cRAWLER
+
+        lambda_client = boto3.client('glue')
+
+        lambda_client.start_crawler(Name='myCrawler46335128')
+
+        logging.info("Crawler started.")
+
+
+
+
+
+        return {
+
+
+
+            'statusCode': 200,
+
+
+
+            'body': json.dumps('Successfully fetched, processed, and attempted to store API data as CSV.')
+
+
+
+        }
+
+
+
+
+
+
+
+    except Exception as e:
+
+
+
+        logging.error(f"Error processing api.json: {e}")
+
+
+
+        return {
+
+
+
+            'statusCode': 500,
+
+
+
+            'body': json.dumps(f'Error processing api.json: {e}')
+
+
+
+        }
+
+
+
